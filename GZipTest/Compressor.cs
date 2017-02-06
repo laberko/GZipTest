@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.IO;
 using System.IO.Compression;
 using System.Linq;
@@ -12,13 +13,6 @@ namespace GZipTest
 
         public Compressor(string inFileName, string outFileName, bool verbose) : base(inFileName, outFileName, verbose)
         {
-            Console.CancelKeyPress += delegate
-            {
-                Log("Application shut down!");
-                StopRequested = true;
-                InFileStream?.Close();
-                OutFileStream?.Close();
-            };
         }
 
         //read uncompressed data chunks from disk
@@ -37,6 +31,14 @@ namespace GZipTest
                     {
                         if (StopRequested)
                             return;
+                        //ram overload - wait
+                        while ((float)CompInfo.AvailablePhysicalMemory / InitialFreeRam < 0.2)
+                        {
+                            Log("Memory overload. Data reading paused. Free RAM rate: " + (float)CompInfo.AvailablePhysicalMemory / InitialFreeRam);
+                            //force gc cleanup
+                            GC.Collect(2, GCCollectionMode.Forced);
+                            Thread.Sleep(1000);
+                        }
                         //optimal data read chunk size based on ram and cpu cores
                         var dataChunkSize = (long)CompInfo.AvailablePhysicalMemory / CoreCount / 4;
                         if (inFileStream.Length - inFileStream.Position <= dataChunkSize)
@@ -44,9 +46,9 @@ namespace GZipTest
                             dataChunkSize = inFileStream.Length - inFileStream.Position;
                         if (inFileStream.Length < dataChunkSize)
                             dataChunkSize = inFileStream.Length / CoreCount + 1;
-                        if (dataChunkSize > 1024*1024*1024)
+                        if (dataChunkSize > 256*1024*1024)
                             //we don't need too huge chunks
-                            dataChunkSize = 1024*1024*1024;
+                            dataChunkSize = 256*1024*1024;
                         var dataChunk = new byte[dataChunkSize];
                         //read file
                         inFileStream.Read(dataChunk, 0, (int)dataChunkSize);
@@ -65,7 +67,7 @@ namespace GZipTest
             }
             catch (Exception ex)
             {
-                Log("ERROR: " + ex.Message);
+                Log("ERROR!\n" + ex);
                 StopRequested = true;
                 Console.Write("1");
             }
@@ -79,7 +81,9 @@ namespace GZipTest
             ProcessSemaphore.WaitOne();
             try
             {
-                var chunk = IncomingChunks.FirstOrDefault(b => b.Key == chunkNumber);
+                KeyValuePair<int, byte[]> chunk;
+                lock (Locker)
+                    chunk = IncomingChunks.FirstOrDefault(b => b.Key == chunkNumber);
                 //stream for processed data
                 using (var outMemStream = new MemoryStream())
                 {
@@ -92,20 +96,19 @@ namespace GZipTest
                     }
                     //compressed bytes
                     var bytes = outMemStream.ToArray();
-                    //add new data chunk to collection of compressed data
                     lock (Locker)
+                    {
+                        //add new data chunk to collection of compressed data
                         OutgoingChunks.Add(chunkNumber, bytes);
-                    //remove chunk from collection of uncompressed data
-                    lock (Locker)
+                        //remove chunk from collection of uncompressed data
                         IncomingChunks.Remove(chunkNumber);
-                    //force gc cleanup of processed bytes
-                    GC.Collect(2, GCCollectionMode.Forced);
+                    }
                     Log("#" + chunkNumber + " compressed! Size(MB) = " + bytes.Length / (1024 * 1024));
                 }
             }
             catch (Exception ex)
             {
-                Log("ERROR: " + ex.Message);
+                Log("ERROR!\n" + ex);
                 StopRequested = true;
                 Console.Write("1");
             }
@@ -131,7 +134,9 @@ namespace GZipTest
                         //waiting for the next chunk to flush to disk
                         for (;;)
                         {
-                            var chunk = OutgoingChunks.FirstOrDefault(b => b.Key == chunkNumber);
+                            KeyValuePair<int, byte[]> chunk;
+                            lock (Locker)
+                                chunk = OutgoingChunks.FirstOrDefault(b => b.Key == chunkNumber);
                             if (chunk.Value != null)
                             {
                                 if (StopRequested)
@@ -142,22 +147,19 @@ namespace GZipTest
                                 Log("#" + chunk.Key + " flushed to disk!");
                                 lock (Locker)
                                     OutgoingChunks.Remove(chunk.Key);
-                                //force gc cleanup of processed bytes
-                                GC.Collect(2, GCCollectionMode.Forced);
                                 break;
                             }
                             Thread.Sleep(100);
                         }
                     }
                     var elapsed = DateTime.Now - StartTime;
-                    Log("Time elapsed: " + elapsed.TotalSeconds + " sec. Press a key to exit.");
+                    Log("Time elapsed: " + elapsed.TotalSeconds + " seconds.");
                     Console.Write("0");
-                    Console.ReadKey();
                 }
             }
             catch (Exception ex)
             {
-                Log("ERROR: " + ex.Message);
+                Log("ERROR!\n" + ex);
                 StopRequested = true;
                 Console.Write("1");
             }

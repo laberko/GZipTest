@@ -30,6 +30,7 @@ namespace GZipTest
         protected bool StopRequested;
         protected FileStream InFileStream;
         protected FileStream OutFileStream;
+        protected readonly ulong InitialFreeRam;
 
 
         protected Worker(string inFileName, string outFileName, bool verbose)
@@ -42,9 +43,18 @@ namespace GZipTest
             IncomingChunks = new Dictionary<int, byte[]>();
             ProcessSemaphore = new Semaphore(CoreCount, CoreCount);
             FlushThread = new Thread(FlushToDisk);
+            InitialFreeRam = CompInfo.AvailablePhysicalMemory;
             _logFile = new StreamWriter(inFileName + ".log")
             {
                 AutoFlush = true
+            };
+            Console.CancelKeyPress += delegate
+            {
+                Log("Application shut down!");
+                StopRequested = true;
+                InFileStream?.Close();
+                OutFileStream?.Close();
+                Console.Write("1");
             };
         }
 

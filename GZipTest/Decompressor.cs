@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.IO;
 using System.IO.Compression;
 using System.Linq;
@@ -12,13 +13,6 @@ namespace GZipTest
 
         public Decompressor(string inFileName, string outFileName, bool verbose) : base(inFileName, outFileName, verbose)
         {
-            Console.CancelKeyPress += delegate
-            {
-                Log("Application shut down!");
-                StopRequested = true;
-                InFileStream?.Close();
-                OutFileStream?.Close();
-            };
         }
 
         //read compressed data chunks from disk
@@ -38,6 +32,14 @@ namespace GZipTest
                     {
                         if (StopRequested)
                             return;
+                        //ram overload - wait
+                        while ((float)CompInfo.AvailablePhysicalMemory / InitialFreeRam < 0.2)
+                        {
+                            Log("Memory overload. Data reading paused. Free RAM rate: " + (float)CompInfo.AvailablePhysicalMemory / InitialFreeRam);
+                            //force gc cleanup
+                            GC.Collect(2, GCCollectionMode.Forced);
+                            Thread.Sleep(1000);
+                        }
                         //extract compressed data chunk size from gzip header
                         inFileStream.Read(header, 0, 8);
                         var dataChunkSize = BitConverter.ToInt32(header, 4);
@@ -59,7 +61,7 @@ namespace GZipTest
             }
             catch (Exception ex)
             {
-                Log("ERROR: " + ex.Message);
+                Log("ERROR!\n" + ex);
                 StopRequested = true;
                 Console.Write("1");
             }
@@ -73,7 +75,9 @@ namespace GZipTest
             ProcessSemaphore.WaitOne();
             try
             {
-                var chunk = IncomingChunks.FirstOrDefault(b => b.Key == chunkNumber);
+                KeyValuePair<int, byte[]> chunk;
+                lock (Locker)
+                    chunk = IncomingChunks.FirstOrDefault(b => b.Key == chunkNumber);
                 using (var inMemStream = new MemoryStream(chunk.Value, 0, chunk.Value.Length))
                 {
                     //stream for processed data
@@ -85,18 +89,17 @@ namespace GZipTest
                         }
                         var bytes = outMemStream.ToArray();
                         lock (Locker)
+                        {
                             OutgoingChunks.Add(chunkNumber, bytes);
-                        lock (Locker)
                             IncomingChunks.Remove(chunkNumber);
-                        //force gc cleanup of processed bytes
-                        GC.Collect(2, GCCollectionMode.Forced);
+                        }
                         Log("#" + chunkNumber + " uncompressed! Size(MB) = " + bytes.Length / (1024 * 1024));
                     }
                 }
             }
             catch (Exception ex)
             {
-                Log("ERROR: " + ex.Message);
+                Log("ERROR!\n" + ex);
                 StopRequested = true;
                 Console.Write("1");
             }
@@ -124,7 +127,9 @@ namespace GZipTest
                         {
                             if (StopRequested)
                                 return;
-                            var chunk = OutgoingChunks.FirstOrDefault(b => b.Key == chunkNumber);
+                            KeyValuePair<int, byte[]> chunk;
+                            lock (Locker)
+                                chunk = OutgoingChunks.FirstOrDefault(b => b.Key == chunkNumber);
                             if (chunk.Value != null)
                             {
                                 outFileStream.Write(chunk.Value, 0, chunk.Value.Length);
@@ -139,14 +144,13 @@ namespace GZipTest
                         }
                     }
                     var elapsed = DateTime.Now - StartTime;
-                    Log("Time elapsed: " + elapsed.TotalSeconds + " sec. Press a key to exit.");
+                    Log("Time elapsed: " + elapsed.TotalSeconds + " seconds.");
                     Console.Write("0");
-                    Console.ReadKey();
                 }
             }
             catch (Exception ex)
             {
-                Log("ERROR: " + ex.Message);
+                Log("ERROR!\n" + ex);
                 StopRequested = true;
                 Console.Write("1");
             }
